@@ -14,8 +14,6 @@ from app.services.mimo_vision_service import (
 )
 
 CHINESE_PATTERN = re.compile(r"[一-鿿]")
-FONT_PATH = Path("C:/Windows/Fonts/arial.ttf")
-FONT_BOLD_PATH = Path("C:/Windows/Fonts/arialbd.ttf")
 OCR_SCALE_FACTOR = 3
 
 
@@ -530,7 +528,6 @@ async def translate_chinese_text_on_image(
     # --- erase & redraw on original ------------------------------------------
     output_path.parent.mkdir(parents=True, exist_ok=True)
     draw = ImageDraw.Draw(original_image)
-    font_path = str(FONT_PATH) if FONT_PATH.exists() else None
 
     for idx, ((left, top, right, bottom), original_text) in enumerate(candidates):
         trans = translation_results[idx] if idx < len(translation_results) else {}
@@ -583,13 +580,7 @@ async def translate_chinese_text_on_image(
         final_font_size = 0
 
         def _make_font(size: int) -> ImageFont.FreeTypeFont:
-            selected_font = FONT_BOLD_PATH if is_large_title and FONT_BOLD_PATH.exists() else FONT_PATH
-            font_file = str(selected_font) if selected_font.exists() else None
-            return (
-                ImageFont.truetype(font_file, size=size)
-                if font_file
-                else ImageFont.load_default()
-            )
+            return ImageFont.load_default()
 
         # 1) original size, single line
         font = _make_font(orig_font_size)

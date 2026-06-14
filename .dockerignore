@@ -1,0 +1,12 @@
+node_modules/
+.git/
+.vscode/
+.idea/
+uploads/
+outputs/
+*.log
+__pycache__/
+*.pyc
+frontend/src/
+frontend/node_modules/
+.env
