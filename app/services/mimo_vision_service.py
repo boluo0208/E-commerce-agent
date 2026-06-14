@@ -134,6 +134,72 @@ async def analyze_product_image_with_mimo(image_path: Path) -> VisionResult:
     )
 
 
+async def recognize_text_in_region(
+    image: Image.Image,
+    bbox: tuple[int, int, int, int],
+) -> str:
+    """Crop *image* to *bbox* and ask Mimo to read the Chinese text inside.
+
+    Returns the recognised text, or ``""`` on failure / no Chinese.
+    """
+    if not settings.mimo_api_key or not settings.mimo_base_url or not settings.mimo_model:
+        return ""
+
+    left, top, right, bottom = bbox
+    if right <= left or bottom <= top:
+        return ""
+
+    crop = image.crop((left, top, right, bottom))
+
+    import io
+    buf = io.BytesIO()
+    crop.save(buf, format="JPEG", quality=95)
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    data_url = f"data:image/jpeg;base64,{encoded}"
+
+    url = f"{settings.mimo_base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {settings.mimo_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.mimo_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Read the Chinese text visible in this image region. "
+                            "Return valid JSON only: {\"text\": \"the Chinese text\"}. "
+                            "If there is no Chinese text, return {\"text\": \"\"}."
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        "temperature": 0.05,
+        "response_format": {"type": "json_object"},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        return ""
+
+    try:
+        data = json.loads(resp.json()["choices"][0]["message"]["content"])
+        text = str(data.get("text") or "").strip()
+    except (KeyError, json.JSONDecodeError):
+        return ""
+
+    return text
+
+
 async def detect_chinese_text_regions_with_mimo(image_path: Path) -> list[dict]:
     if not settings.mimo_api_key or not settings.mimo_base_url or not settings.mimo_model:
         return []

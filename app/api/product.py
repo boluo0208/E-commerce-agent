@@ -116,12 +116,23 @@ def _compute_overall_color(vision_results: list[VisionResult]) -> str:
 
 
 def _compute_color_label(vision_results: list[VisionResult]) -> str:
-    """Return the single dominant colour from the first image that has one."""
+    """Return the darkest product colour across all images."""
+    # Ordered from darkest → lightest.
+    _DARKNESS_ORDER: dict[str, int] = {
+        "黑色": 0, "紫色": 1, "蓝色": 2, "棕色": 3,
+        "绿色": 4, "红色": 5, "灰色": 6, "银色": 7,
+        "橙色": 8, "金色": 9, "粉色": 10, "黄色": 11,
+        "米色": 12, "白色": 13,
+    }
+    best_rank = 999
+    best_label = "未知"
     for vr in vision_results:
         label = (vr.color_label or "").strip()
-        if label and label.lower() not in ("unknown", ""):
-            return label
-    return "unknown"
+        rank = _DARKNESS_ORDER.get(label, 999)
+        if rank < best_rank:
+            best_rank = rank
+            best_label = label
+    return best_label
 
 
 @router.post("/generate")

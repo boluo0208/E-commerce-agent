@@ -1,3 +1,4 @@
+import asyncio
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -7,7 +8,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from app.core.config import settings
 from app.services.deepseek_service import translate_texts_to_english_with_deepseek
-from app.services.mimo_vision_service import detect_chinese_text_regions_with_mimo
+from app.services.mimo_vision_service import (
+    detect_chinese_text_regions_with_mimo,
+    recognize_text_in_region,
+)
 
 CHINESE_PATTERN = re.compile(r"[一-鿿]")
 FONT_PATH = Path("C:/Windows/Fonts/arial.ttf")
@@ -359,6 +363,9 @@ async def translate_chinese_text_on_image(
     candidates: list[tuple[tuple[int, int, int, int], str]] = []
     ocr_has_chinese = False
     ocr_has_large_garbled = False
+    # Deferred Mimo tasks for individual regions where OCR found a bbox but
+    # the text was garbled / not Chinese.
+    mimo_tasks: list[tuple[tuple[int, int, int, int], asyncio.Task]] = []
 
     for box, text, confidence in ocr_items:
         original_box = scale_box_back(box, OCR_SCALE_FACTOR)
@@ -385,19 +392,37 @@ async def translate_chinese_text_on_image(
             ))
             continue
 
-        # ---- invalid / no Chinese -------------------------------------------
+        # ---- invalid / no Chinese → try Mimo on this exact region ----------
         if is_invalid_ocr_text(text) or not contains_chinese(text):
             is_large = _is_large_title(bbox, img_w, img_h)
             if is_large and is_invalid_ocr_text(text):
                 ocr_has_large_garbled = True
-            region_debug.append(_make_debug(
-                original_text=text,
-                bbox=[left, top, right, bottom],
-                confidence=round(confidence, 3),
-                confidence_threshold=threshold,
-                estimated_original_font_size=estimate_original_font_size(bbox),
-                skip_reason="no_chinese_or_invalid_ocr",
-            ))
+
+            padded = (
+                max(0, left - 4), max(0, top - 4),
+                min(img_w, right + 4), min(img_h, bottom + 4),
+            )
+            bg_info = estimate_surrounding_background(original_image, padded)
+            if not bg_info["is_light"]:
+                region_debug.append(_make_debug(
+                    original_text=text,
+                    bbox=[left, top, right, bottom],
+                    confidence=round(confidence, 3),
+                    confidence_threshold=threshold,
+                    estimated_original_font_size=estimate_original_font_size(bbox),
+                    background_luminance=round(bg_info["mean_luminance"], 1),
+                    skip_reason="background_not_light",
+                ))
+                continue
+
+            # Fire Mimo recognition on the cropped region (async, gathered later).
+            async def _mimo_recognize(_bbox: tuple, _padded: tuple):
+                mimo_text = await recognize_text_in_region(original_image, _padded)
+                return (_bbox, _padded, mimo_text)
+
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(_mimo_recognize(bbox, padded))
+            mimo_tasks.append((bbox, task))
             continue
 
         # ---- background check -----------------------------------------------
@@ -419,6 +444,33 @@ async def translate_chinese_text_on_image(
             continue
 
         candidates.append((padded, text))
+
+    # --- resolve deferred Mimo tasks -----------------------------------------
+    if mimo_tasks:
+        await asyncio.gather(*(t for _, t in mimo_tasks), return_exceptions=True)
+    for (orig_bbox, task) in mimo_tasks:
+        try:
+            result = task.result()
+        except Exception:
+            result = None
+        if result is None:
+            continue
+        bbox, padded, mimo_text = result
+        if mimo_text and contains_chinese(mimo_text) and not is_invalid_ocr_text(mimo_text):
+            candidates.append((padded, mimo_text))
+            region_debug.append(_make_debug(
+                original_text=mimo_text,
+                bbox=list(padded),
+                detected_by="mimo_crop",
+                skip_reason=None,
+            ))
+        else:
+            region_debug.append(_make_debug(
+                original_text=mimo_text or "",
+                bbox=list(padded),
+                detected_by="mimo_crop",
+                skip_reason="mimo_crop_no_valid_chinese",
+            ))
 
     # --- Mimo fallback -------------------------------------------------------
     should_use_mimo = (not ocr_has_chinese) or ocr_has_large_garbled

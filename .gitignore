@@ -1,6 +1,3 @@
-# secrets
-.env
-
 # dependencies
 frontend/node_modules/
 

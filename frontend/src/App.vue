@@ -174,7 +174,10 @@ async function generateExport() {
     })
 
     activeStep.value = 5
-    downloadBlob(response.data, 'product_export.zip')
+    const disposition = response.headers['content-disposition'] || ''
+    const match = disposition.match(/filename\*=utf-8''(.+)/)
+    const filename = match ? decodeURIComponent(match[1]) : 'product_export.zip'
+    downloadBlob(response.data, filename)
     message.value = '生成完成，ZIP 已开始下载。'
     messageType.value = 'success'
     ElMessage.success('生成完成')

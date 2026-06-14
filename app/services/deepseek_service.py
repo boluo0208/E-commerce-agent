@@ -209,7 +209,14 @@ async def translate_texts_to_english_with_deepseek(texts: list[str]) -> list[dic
     except (KeyError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=502, detail="DeepSeek returned invalid translation JSON") from exc
 
-    translations = data.get("translations")
+    # Handle both wrapped {\"translations\": [...]} and bare [...] responses.
+    if isinstance(data, list):
+        translations = data
+    elif isinstance(data, dict):
+        translations = data.get("translations")
+    else:
+        translations = None
+
     if not isinstance(translations, list):
         raise HTTPException(status_code=502, detail="DeepSeek translation JSON missing translations")
 
