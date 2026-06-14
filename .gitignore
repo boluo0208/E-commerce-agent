@@ -1,0 +1,19 @@
+# secrets
+.env
+
+# dependencies
+frontend/node_modules/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# runtime data
+uploads/
+outputs/
+*.log
+
+# ide
+.vscode/
+.idea/
