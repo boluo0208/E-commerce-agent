@@ -9,8 +9,13 @@ __pycache__/
 # runtime data
 uploads/
 outputs/
+test/test_outputs/
 *.log
 
+# secrets
+.env
+
 # ide
+.claude/
 .vscode/
 .idea/

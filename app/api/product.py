@@ -12,9 +12,15 @@ from app.core.config import settings
 from app.schemas.product import ProductExportRow, VisionResult
 from app.services.deepseek_service import generate_content_with_deepseek
 from app.services.export_service import create_export_zip, export_to_excel
-from app.services.image_split_service import split_composite_image
-from app.services.image_service import resize_with_white_background
-from app.services.image_text_service import translate_chinese_text_on_image
+from app.services.image_translate import (
+    ModuleConfig,
+    PipelineInput,
+    run_pipeline,
+)
+from app.services.image_translate.processor import (
+    resize_with_white_background,
+    split_composite_image,
+)
 from app.services.mimo_vision_service import analyze_product_image_with_mimo
 
 router = APIRouter()
@@ -135,6 +141,25 @@ def _compute_color_label(vision_results: list[VisionResult]) -> str:
     return best_label
 
 
+def _build_image_translate_config() -> ModuleConfig:
+    """Map the main app's Settings to the image-translate module's config."""
+    return ModuleConfig(
+        translate_api_key=settings.deepseek_api_key,
+        translate_base_url=settings.deepseek_base_url,
+        translate_model=settings.deepseek_model,
+        mimo_api_key=settings.mimo_api_key,
+        mimo_base_url=settings.mimo_base_url,
+        mimo_model=settings.mimo_model,
+        mock_translate_when_no_key=settings.mock_llm_when_no_key,
+        mock_vision_when_no_key=settings.mock_vision_when_no_key,
+        translate_image_text=settings.translate_image_text,
+        translate_image_text_min_confidence=settings.translate_image_text_min_confidence,
+        auto_split_composite=settings.auto_split_composite_images,
+        resize_enabled=True,
+        resize_target_size=(660, 900),
+    )
+
+
 @router.post("/generate")
 async def generate_product_export(
     chinese_title: str = Form(..., min_length=1),
@@ -158,6 +183,9 @@ async def generate_product_export(
     split_upload_dir = upload_dir / "splits"
     translated_upload_dir = upload_dir / "translated"
 
+    # ---- build module config -------------------------------------------------
+    module_config = _build_image_translate_config()
+
     # ---- debug accumulator --------------------------------------------------
     debug_images: list[dict] = []
 
@@ -178,9 +206,16 @@ async def generate_product_export(
             processed_image_path = processed_image_dir / f"product_{output_index:03d}.jpg"
             translated_path = translated_upload_dir / f"product_{output_index:03d}.jpg"
 
-            translated_source_path, ocr_regions = await translate_chinese_text_on_image(
-                split_path, translated_path,
+            # --- new pipeline: OCR → merge → translate → erase → redraw ------
+            pipeline_input = PipelineInput(
+                image_path=split_path,
+                output_path=translated_path,
+                apply_resize=False,
+                apply_split=False,
             )
+            pipeline_result = await run_pipeline(pipeline_input, module_config)
+            translated_source_path = pipeline_result.processed_path
+            ocr_regions = [r.to_dict() for r in pipeline_result.regions]
 
             with Image.open(split_path) as pil_split:
                 split_w, split_h = pil_split.size

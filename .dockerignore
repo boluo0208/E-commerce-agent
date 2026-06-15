@@ -1,5 +1,6 @@
 node_modules/
 .git/
+.gitignore
 .vscode/
 .idea/
 uploads/
@@ -7,6 +8,12 @@ outputs/
 *.log
 __pycache__/
 *.pyc
+.pytest_cache/
 frontend/src/
 frontend/node_modules/
+frontend/package.json
+frontend/package-lock.json
+frontend/vite.config.js
 .env
+test/
+test_outputs/
