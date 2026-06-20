@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     mimo_api_key: str = ""
     mimo_base_url: str = ""
     mimo_model: str = ""
+    ark_api_key: str = ""
+    ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    ark_seedream_model: str = "doubao-seedream-5-0-260128"
+    use_seedream_erase: bool = False
+    seedream_watermark: bool = False
+    seedream_timeout: int = 120
     mock_llm_when_no_key: bool = True
     mock_vision_when_no_key: bool = True
     max_concurrent_images: int = 4

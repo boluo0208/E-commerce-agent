@@ -1951,3 +1951,371 @@ def erase_and_draw_merged_paragraphs(
     # --- save once -----------------------------------------------------------
     image.save(output_path, format="JPEG", quality=jpeg_quality, subsampling=0, optimize=True)
     return image, region_debug
+
+
+# ---------------------------------------------------------------------------
+# draw-only renderer (for use AFTER Seedream or other external erase)
+# ---------------------------------------------------------------------------
+
+
+def draw_merged_paragraph_translations(
+    image: Image.Image,
+    merged_paragraphs: list[MergedParagraph],
+    translation_results: list[dict],
+    output_path: str,
+    jpeg_quality: int = 95,
+) -> tuple[Image.Image, list[RegionDebug]]:
+    """Draw English translations onto an already-clean image (no erase step).
+
+    This is the draw-only counterpart of
+    :func:`erase_and_draw_merged_paragraphs`.  It assumes Chinese text has
+    already been removed (e.g. by Seedream) and only handles PIL text
+    rendering — typesetting, font sizing, alignment, colour, and shadow.
+
+    Args:
+        image: PIL Image (RGB) with Chinese text already erased.
+        merged_paragraphs: List of ``MergedParagraph``.
+        translation_results: List of ``{original, full_translation, image_translation}``,
+            one per merged paragraph.
+        output_path: Where to save the final JPEG.
+        jpeg_quality: JPEG quality (1–100).
+
+    Returns:
+        ``(modified_image, region_debug_list)``.
+    """
+    img_w, img_h = image.size
+    draw = ImageDraw.Draw(image)
+    region_debug: list[RegionDebug] = []
+    drawn_bboxes: list[tuple[int, int, int, int]] = []
+
+    for idx, para in enumerate(merged_paragraphs):
+        trans = translation_results[idx] if idx < len(translation_results) else {}
+        full_trans = trans.get("full_translation", para.merged_text)
+        image_trans = trans.get("image_translation", full_trans)
+
+        left, top, right, bottom = para.merged_bbox
+        box_w = max(20, right - left - 6)
+        box_h = max(10, bottom - top - 4)
+        orig_fs = para.estimated_font_size or estimate_original_font_size(para.merged_bbox)
+
+        # --- background check on merged bbox ---------------------------------
+        bg_info = estimate_surrounding_background(image, para.merged_bbox)
+        bg_rgb = estimate_background_color(image, para.merged_bbox)
+        bg_lum = 0.2126 * bg_rgb[0] + 0.7152 * bg_rgb[1] + 0.0722 * bg_rgb[2]
+        is_light_bg = bg_lum >= 150
+
+        # --- text-height sanity check -----------------------------------------
+        if box_h < 14:
+            region_debug.append(_make_rd(
+                para.merged_text, full_trans, image_trans,
+                left, top, right, bottom, orig_fs,
+                bg_info, translated=True, replaced=False,
+                skip_reason="final_text_too_small",
+            ))
+            continue
+
+        # --- detect text colour + role (image is already clean) -----------------
+        ts_debug: dict = {}
+        from .ocr import is_compact_label, classify_text_role  # noqa: F811
+        is_compact, compact_reasons = is_compact_label(
+            para.merged_bbox, (img_w, img_h), para.merged_text,
+        )
+        orig_tc, orig_tc_rgb, orig_tc_conf = detect_original_text_color(
+            image, para.merged_bbox,
+        )
+        is_white_text = orig_tc == "white"
+
+        text_role = classify_text_role(
+            para.merged_bbox, (img_w, img_h), para.merged_text,
+            font_size=orig_fs,
+            is_white_text=is_white_text,
+            is_compact=is_compact,
+        )
+        is_hero = text_role == "hero_headline"
+        is_bottom_hero = text_role == "bottom_hero_headline"
+        para_w = max(1, right - left)
+        para_h = max(1, bottom - top)
+        is_feature_label = (
+            not is_hero and not is_bottom_hero and not is_compact
+            and top > img_h * 0.05
+            and para_h <= img_h * 0.16
+            and para_w <= img_w * 0.55
+        )
+        ts_debug["text_role"] = text_role
+
+        # --- overlap check BEFORE draw -----------------------------------------
+        overlap = False
+        for prev_bbox in drawn_bboxes:
+            pl, pt, pr, pb = prev_bbox
+            il = max(left, pl); it = max(top, pt)
+            ir = min(right, pr); ib = min(bottom, pb)
+            if il < ir and it < ib:
+                iou_area = (ir - il) * (ib - it)
+                this_area = max(1, (right - left) * (bottom - top))
+                if iou_area / this_area > 0.5:
+                    overlap = True
+                    break
+        if overlap:
+            region_debug.append(_make_rd(
+                para.merged_text, full_trans, image_trans,
+                left, top, right, bottom, orig_fs,
+                bg_info, translated=True, replaced=False,
+                skip_reason="overlap_with_previous_draw",
+            ))
+            continue
+
+        # --- choose text colour ------------------------------------------------
+        if is_hero:
+            text_color = (255, 255, 255)
+            ts_debug["text_color_inherited"] = "white_from_product_badge"
+        elif is_bottom_hero:
+            text_color = (12, 12, 12)
+            ts_debug["text_color_inherited"] = "black_from_bottom_hero"
+        elif is_light_bg:
+            text_color = (20, 20, 20)
+        else:
+            text_color = (255, 255, 255)
+
+        ts_debug["original_text_color"] = orig_tc
+        ts_debug["final_text_color"] = "white" if text_color == (255, 255, 255) else "black"
+
+        # --- choose text -------------------------------------------------------
+        is_title = orig_fs >= _TITLE_FONT_THRESHOLD or is_hero or is_bottom_hero
+        draw_text = full_trans
+        if is_hero:
+            draw_text = _shorten_hero_badge_text(para.merged_text, full_trans, image_trans)
+            image_trans = draw_text
+            full_trans = draw_text
+            box_w = max(20, min(box_w, img_w - left - 8))
+            ts_debug["product_badge_shortened"] = True
+        elif is_bottom_hero:
+            draw_text = _shorten_bottom_hero_text(para.merged_text, full_trans, image_trans)
+            image_trans = draw_text
+            full_trans = draw_text
+            box_w = max(20, min(box_w, img_w - left - 8))
+            ts_debug["bottom_hero_shortened"] = True
+        elif is_feature_label:
+            fallback = _fallback_english_text(para.merged_text, full_trans, image_trans, text_role)
+            valid_now, _reason_now = validate_draw_text(image_trans or full_trans)
+            candidate_words = (image_trans or full_trans or "").replace("\n", " ").split()
+            if (not valid_now) or len(candidate_words) > 10 or "." in (image_trans or full_trans):
+                draw_text = fallback
+                image_trans = fallback
+                full_trans = fallback
+                ts_debug["feature_fallback_used"] = True
+            else:
+                draw_text = image_trans or full_trans
+            box_w = max(20, min(box_w, img_w - left - 8))
+
+        # --- detect alignment ---------------------------------------------------
+        if is_compact:
+            alignment = "center"
+        else:
+            alignment = detect_text_alignment(para.lines, img_w)
+        if is_hero or is_bottom_hero:
+            alignment = "left"
+
+        # --- typeset -----------------------------------------------------------
+        if is_compact:
+            lines, final_fs, draw_h, expanded_by, _ts = _typeset_compact_label(
+                draw, draw_text, box_w, box_h, orig_fs,
+                img_w, img_h, img_bottom=bottom,
+            )
+            ts_debug.update(_ts)
+            ts_debug["compact_reasons"] = compact_reasons
+        elif is_hero or is_bottom_hero:
+            lines, final_fs, draw_h, expanded_by, _ts = _typeset_english(
+                draw, draw_text, box_w, box_h, orig_fs,
+                img_w, img_h, img_bottom=bottom, is_title=True,
+                title_width_factor=1.0,
+            )
+            ts_debug.update(_ts)
+            ts_debug["hero_headline"] = is_hero
+            ts_debug["bottom_hero_headline"] = is_bottom_hero
+        else:
+            lines, final_fs, draw_h, expanded_by, _ts = _typeset_english(
+                draw, draw_text, box_w, box_h, orig_fs,
+                img_w, img_h, img_bottom=bottom,
+            )
+            ts_debug.update(_ts)
+
+        # --- fallback to image_translation ------------------------------------
+        if lines is None and image_trans != full_trans:
+            if is_compact:
+                lines, final_fs, draw_h, expanded_by, _ts = _typeset_compact_label(
+                    draw, image_trans, box_w, box_h, orig_fs,
+                    img_w, img_h, img_bottom=bottom,
+                )
+                ts_debug.update(_ts)
+            elif is_hero or is_bottom_hero:
+                lines, final_fs, draw_h, expanded_by, _ts = _typeset_english(
+                    draw, image_trans, box_w, box_h, orig_fs,
+                    img_w, img_h, img_bottom=bottom, is_title=True,
+                    title_width_factor=1.0,
+                )
+                ts_debug.update(_ts)
+            else:
+                lines, final_fs, draw_h, expanded_by, _ts = _typeset_english(
+                    draw, image_trans, box_w, box_h, orig_fs,
+                    img_w, img_h, img_bottom=bottom,
+                )
+                ts_debug.update(_ts)
+            if lines is not None:
+                draw_text = image_trans
+                ts_debug.update(_ts)
+
+        if lines is None:
+            region_debug.append(_make_rd(
+                para.merged_text, full_trans, image_trans,
+                left, top, right, bottom, orig_fs,
+                bg_info, translated=True, replaced=False,
+                skip_reason=f"typeset_failed: {ts_debug.get('phase','?')}",
+            ))
+            continue
+
+        # --- validate draw text ------------------------------------------------
+        draw_valid, draw_valid_reason = validate_draw_text(draw_text)
+        if not draw_valid:
+            fallback = _fallback_english_text(para.merged_text, full_trans, image_trans, text_role)
+            fallback_valid, fallback_reason = validate_draw_text(fallback)
+            if fallback_valid:
+                draw_text = fallback
+                image_trans = fallback
+                full_trans = fallback
+                ts_debug["draw_text_recovered"] = draw_valid_reason
+                if is_compact:
+                    lines, final_fs, draw_h, expanded_by, _ts = _typeset_compact_label(
+                        draw, draw_text, box_w, box_h, orig_fs,
+                        img_w, img_h, img_bottom=bottom,
+                    )
+                else:
+                    lines, final_fs, draw_h, expanded_by, _ts = _typeset_english(
+                        draw, draw_text, box_w, box_h, orig_fs,
+                        img_w, img_h, img_bottom=bottom,
+                        is_title=(is_title or is_feature_label),
+                        title_width_factor=1.0,
+                    )
+                ts_debug.update(_ts)
+                if lines is None:
+                    region_debug.append(_make_rd(
+                        para.merged_text, full_trans, image_trans,
+                        left, top, right, bottom, orig_fs,
+                        bg_info, translated=True, replaced=False,
+                        skip_reason=f"fallback_typeset_failed:{ts_debug.get('phase','?')}",
+                    ))
+                    continue
+            else:
+                region_debug.append(_make_rd(
+                    para.merged_text, full_trans, image_trans,
+                    left, top, right, bottom, orig_fs,
+                    bg_info, translated=True, replaced=False,
+                    skip_reason=f"draw_text_invalid:{draw_valid_reason};fallback:{fallback_reason}",
+                ))
+                continue
+
+        # --- overlap recheck --------------------------------------------------
+        overlap = False
+        for prev_bbox in drawn_bboxes:
+            pl, pt, pr, pb = prev_bbox
+            il = max(left, pl); it = max(top, pt)
+            ir = min(right, pr); ib = min(bottom, pb)
+            if il < ir and it < ib:
+                iou_area = (ir - il) * (ib - it)
+                this_area = max(1, (right - left) * (bottom - top))
+                if iou_area / this_area > 0.5:
+                    overlap = True
+                    break
+        if overlap:
+            region_debug.append(_make_rd(
+                para.merged_text, full_trans, image_trans,
+                left, top, right, bottom, orig_fs,
+                bg_info, translated=True, replaced=False,
+                skip_reason="overlap_with_previous_draw",
+            ))
+            continue
+        drawn_bboxes.append((left, top, right, bottom))
+
+        ts_debug["draw_count"] = len(drawn_bboxes)
+        ts_debug["draw_overlap"] = False
+        ts_debug["draw_valid"] = True
+        ts_debug["validated_text"] = draw_text[:60]
+
+        # --- crisp text rendering ---------------------------------------------
+        font = _make_font(final_fs)
+        font_path = _find_system_font() or "default"
+        ts_debug["font_path"] = font_path
+        font_ok = _font_supports_text(draw_text, font)
+        ts_debug["font_supports_text"] = font_ok
+
+        lh = _line_height_for_font(final_fs)
+        total_text_h = lh * len(lines)
+
+        effective_bottom = bottom + expanded_by
+        draw_area_h = effective_bottom - top
+        y_start = top + max(2, (draw_area_h - total_text_h) // 2)
+
+        ts_debug["alignment"] = alignment
+
+        shadow_enabled = (not is_light_bg) or is_hero
+        shadow_offset = (1, 1)
+        stroke_width = 1 if (shadow_enabled and final_fs >= 20) else 0
+
+        ts_debug["font_size"] = final_fs
+        ts_debug["fill_alpha"] = 255
+        ts_debug["stroke_width"] = stroke_width
+        ts_debug["glow_enabled"] = False
+        ts_debug["glow_radius"] = 0
+        ts_debug["shadow_enabled"] = shadow_enabled
+        ts_debug["shadow_offset"] = str(shadow_offset) if shadow_enabled else "none"
+        ts_debug["text_layer_blurred"] = False
+        ts_debug["output_format"] = "JPEG"
+        ts_debug["jpeg_quality"] = jpeg_quality
+
+        for li, line in enumerate(lines):
+            line_w = draw.textbbox((0, 0), line, font=font)[2]
+            if alignment == "left":
+                x = left + 2
+            elif alignment == "right":
+                x = right - 2 - line_w
+            else:
+                x = left + 2 + max(0, (box_w - line_w) // 2)
+            y = y_start + li * lh
+
+            if shadow_enabled:
+                draw.text(
+                    (x + shadow_offset[0], y + shadow_offset[1]),
+                    line, fill=(40, 40, 40), font=font,
+                )
+
+            if stroke_width > 0:
+                for dx in (-1, 1):
+                    draw.text((x + dx, y), line, fill=(50, 50, 50), font=font)
+                for dy in (-1, 1):
+                    draw.text((x, y + dy), line, fill=(50, 50, 50), font=font)
+
+            draw.text((x, y), line, fill=text_color, font=font)
+
+        # --- per-line debug entries for each original OCR line ---------------
+        for ocl in para.lines:
+            l_left, l_top, l_right, l_bottom = ocl.bbox
+            region_debug.append(_make_rd(
+                ocl.text, full_trans, image_trans,
+                l_left, l_top, l_right, l_bottom,
+                ocl.estimated_font_size or orig_fs,
+                {
+                    "is_light": ocl.is_light_background,
+                    "mean_luminance": ocl.background_luminance,
+                },
+                used_font_size=final_fs,
+                final_h=0,
+                detected_by=ocl.detected_by,
+                translated=True,
+                replaced=True,
+                skip_reason=None,
+                typeset_debug=ts_debug,
+                bg_color=bg_rgb,
+            ))
+
+    # --- save once -----------------------------------------------------------
+    image.save(output_path, format="JPEG", quality=jpeg_quality, subsampling=0, optimize=True)
+    return image, region_debug

@@ -3,6 +3,11 @@
 This is the top-level orchestrator.  It ties together ocr.py, translator.py,
 renderer.py, and (optionally) the Mimo vision fallback for Chinese-text
 detection when RapidOCR misses characters.
+
+When ``use_seedream_erase`` is enabled, the erase step is delegated to the
+Volcengine Ark Seedream API (image-to-image inpainting).  Seedream ONLY
+erases Chinese text — it does NOT generate English.  English text is always
+drawn by PIL.
 """
 
 import asyncio
@@ -26,6 +31,7 @@ from .ocr import (
 )
 from .renderer import (
     detect_original_text_color,
+    draw_merged_paragraph_translations,
     erase_and_draw_translations,
     erase_and_draw_merged_paragraphs,
     estimate_original_font_size,
@@ -40,6 +46,7 @@ from .schemas import (
     RegionDebug,
     SplitInfo,
 )
+from .seedream_erase import erase_chinese_text_with_seedream
 from .translator import translate_texts_to_english
 
 
@@ -508,14 +515,51 @@ async def run_pipeline(
 
     # --- erase & redraw on original (using merged paragraphs) -----------------
     input_.output_path.parent.mkdir(parents=True, exist_ok=True)
-    modified_image, draw_rd = erase_and_draw_merged_paragraphs(
-        original_image,
-        merged_paragraphs,
-        translation_results,
-        str(input_.output_path),
-        jpeg_quality=cfg.output_jpeg_quality,
-    )
-    region_debug.extend(draw_rd)
+
+    if cfg.use_seedream_erase:
+        # ---- Seedream path: erase Chinese via API, then draw English via PIL --
+        text_regions: list[dict] = []
+        for para in merged_paragraphs:
+            left, top, right, bottom = para.merged_bbox
+            text_regions.append({
+                "bbox": [left, top, right, bottom],
+                "original_text": para.merged_text,
+            })
+
+        seedream_output = input_.output_path.parent / f"{input_.output_path.stem}_seedream_clean.jpg"
+
+        clean_path = await erase_chinese_text_with_seedream(
+            input_.image_path,
+            text_regions,
+            seedream_output,
+            cfg,
+        )
+        clean_image = Image.open(clean_path)
+        clean_image = ImageOps.exif_transpose(clean_image).convert("RGB")
+
+        # Seedream may resize the image (e.g. 800×800 → 2048×2048).
+        # Resize back to the original dimensions so OCR bbox coordinates align.
+        if clean_image.size != (img_w, img_h):
+            clean_image = clean_image.resize((img_w, img_h), Image.Resampling.LANCZOS)
+
+        modified_image, draw_rd = draw_merged_paragraph_translations(
+            clean_image,
+            merged_paragraphs,
+            translation_results,
+            str(input_.output_path),
+            jpeg_quality=cfg.output_jpeg_quality,
+        )
+        region_debug.extend(draw_rd)
+    else:
+        # ---- local erase + draw (original path) -------------------------------
+        modified_image, draw_rd = erase_and_draw_merged_paragraphs(
+            original_image,
+            merged_paragraphs,
+            translation_results,
+            str(input_.output_path),
+            jpeg_quality=cfg.output_jpeg_quality,
+        )
+        region_debug.extend(draw_rd)
 
     return PipelineOutput(
         processed_path=input_.output_path,

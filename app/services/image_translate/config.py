@@ -25,6 +25,14 @@ class ModuleConfig:
     mimo_model: str = ""
     mimo_timeout: int = 60
 
+    # -- Seedream / Ark image editing API ------------------------------------
+    ark_api_key: str = ""
+    ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    ark_seedream_model: str = "doubao-seedream-5-0-260128"
+    use_seedream_erase: bool = False
+    seedream_watermark: bool = False
+    seedream_timeout: int = 120
+
     # -- Mock switches (work without real API keys) ---------------------------
     mock_translate_when_no_key: bool = True
     mock_vision_when_no_key: bool = True
@@ -61,6 +69,12 @@ class ModuleConfig:
             mimo_base_url=os.getenv("MIMO_BASE_URL", ""),
             mimo_model=os.getenv("MIMO_MODEL", ""),
             mimo_timeout=int(os.getenv("MIMO_TIMEOUT", "60")),
+            ark_api_key=os.getenv("ARK_API_KEY", ""),
+            ark_base_url=os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
+            ark_seedream_model=os.getenv("ARK_SEEDREAM_MODEL", "doubao-seedream-5-0-260128"),
+            use_seedream_erase=os.getenv("USE_SEEDREAM_ERASE", "false").lower() == "true",
+            seedream_watermark=os.getenv("SEEDREAM_WATERMARK", "false").lower() == "true",
+            seedream_timeout=int(os.getenv("SEEDREAM_TIMEOUT", "120")),
             mock_translate_when_no_key=os.getenv("MOCK_TRANSLATE_WHEN_NO_KEY", "true").lower() == "true",
             mock_vision_when_no_key=os.getenv("MOCK_VISION_WHEN_NO_KEY", "true").lower() == "true",
             translate_image_text=os.getenv("TRANSLATE_IMAGE_TEXT", "true").lower() == "true",

@@ -1,8 +1,6 @@
-"""Translation: calls an OpenAI-compatible LLM API to translate Chinese→English.
+"""Translation: call an OpenAI-compatible LLM API for image text copy."""
 
-Extracted from app/services/deepseek_service.py – zero coupling to the main app.
-Config is passed explicitly; no dependency on app.core.config.
-"""
+from __future__ import annotations
 
 import json
 
@@ -11,21 +9,20 @@ import httpx
 from .config import ModuleConfig
 from .schemas import TranslateError
 
-# ---------------------------------------------------------------------------
-# Prompt templates
-# ---------------------------------------------------------------------------
 
 TRANSLATION_SYSTEM_PROMPT = (
-    "You translate Chinese text printed on product images into natural "
-    "English for the same image. Preserve the original meaning and tone. "
-    "Do not summarize a headline into disconnected keywords. "
-    "Do not split one phrase into separate concepts. "
-    "Use natural e-commerce English, not literal word-for-word translation. "
-    "For slogans/headlines, prefer a compact natural phrase such as "
-    "'Move Freely on the Court' rather than 'Court Freedom'. "
-    "For feature labels, use concise labels such as 'Side Slits for Motion'. "
-    "Do not invent material, functions, numbers, or claims. "
-    "Keep brand names, model names, years, sizes, and units unchanged. "
+    "You translate Chinese text printed on product images into natural English "
+    "for the same product image. Preserve the original meaning, selling point, "
+    "numbers, and tone. Use natural cross-border e-commerce English, not "
+    "literal word-for-word translation. For slogans and headlines, write a "
+    "compact natural phrase, not disconnected keywords. For feature labels and "
+    "product-detail captions, use short marketplace copy that can fit back into "
+    "a small image text box. Do not invent material, functions, numbers, sizes, "
+    "certifications, claims, or product benefits that are not in the source. "
+    "Keep brand names, model names, years, sizes, and units unchanged unless a "
+    "unit conversion is explicitly requested by the rules. Use standard English "
+    "spelling only. Do not output pseudo-English, misspelled words, random "
+    "words, mixed Chinese-English fragments, or unreadable abbreviations. "
     "Return exactly one translation object for each input item, in order. "
     "Return valid JSON only."
 )
@@ -35,12 +32,12 @@ def _build_translation_user_message(
     texts: list[str],
     text_types: list[str] | None = None,
 ) -> str:
-    """Build the user message, tagging compact-label items for short-translation mode."""
+    """Build the JSON user prompt for batch translation."""
     items: list[dict] = []
-    for i, t in enumerate(texts):
-        entry: dict = {"text": t}
-        if text_types and i < len(text_types):
-            entry["type"] = text_types[i]
+    for index, text in enumerate(texts):
+        entry: dict = {"text": text}
+        if text_types and index < len(text_types):
+            entry["type"] = text_types[index]
         items.append(entry)
 
     return json.dumps(
@@ -48,61 +45,117 @@ def _build_translation_user_message(
             "items": items,
             "rules": {
                 "full_translation": (
-                    "Complete natural English translation. For headlines, "
-                    "make it a natural headline phrase."
+                    "Complete natural English translation. For headlines, make "
+                    "it a natural product-image headline phrase. Preserve all "
+                    "numbers and product facts."
                 ),
                 "image_translation": (
-                    "English to draw back on the image. Keep it natural. "
-                    "Use 2-8 words for labels; 3-10 words for headlines. "
-                    "Do not shorten so much that meaning becomes awkward."
+                    "English to draw back on the image as real text. Keep it "
+                    "short, natural, and easy to read. Use 2-8 words for labels "
+                    "and 3-10 words for headlines. Prefer common e-commerce "
+                    "phrases. Do not shorten so much that meaning becomes "
+                    "awkward. Do not use rare abbreviations."
                 ),
             },
-            "hero_headline_rules": {
-                "applies_to": "items where type='hero_headline'",
-                "full_translation": (
-                    "Short punchy English for a hero product badge at the top "
-                    "of a product image. 6-12 words max. Use natural line breaks. "
-                    "Preserve key numbers but convert Chinese units: "
-                    "'斤' (jin) → kg (divide by 2). "
-                    "'XL' stays 'XL'. Keep weight ranges like '40-80 kg'. "
-                    "Write compact, natural e-commerce badge copy. "
-                    "Do NOT produce long sentences. "
-                    "Examples: 'Imported Elastic, Snug Fit / Fits 40-80 kg'"
-                ),
-                "image_translation": (
-                    "Same as full_translation — keep it 6-10 words, "
-                    "2 lines max. E-commerce badge style."
-                ),
+            "type_rules": {
+                "hero_headline": {
+                    "applies_to": "items where type='hero_headline'",
+                    "full_translation": (
+                        "Short punchy English for a hero product badge at the "
+                        "top of a product image. Use 6-12 words max and 2 lines "
+                        "max. Preserve key numbers. Convert Chinese weight unit "
+                        "'jin' to kg only when the source clearly uses jin: "
+                        "kg = jin / 2. Keep 'XL' as 'XL'. Keep weight ranges in "
+                        "clear forms like '40-80 kg' or '85-160 lb'. Do not "
+                        "produce long sentences."
+                    ),
+                    "image_translation": (
+                        "Same as full_translation, but keep it extra compact: "
+                        "6-10 words, 2 lines max, e-commerce badge style."
+                    ),
+                    "examples": [
+                        "Imported Elastic, Snug Fit",
+                        "Fits 40-80 kg",
+                        "Stretchy Cuff Design",
+                    ],
+                },
+                "bottom_hero_headline": {
+                    "applies_to": "items where type='bottom_hero_headline'",
+                    "full_translation": (
+                        "Short bold English for the main bottom headline on a "
+                        "product image. Use 5-10 words max, preferably 2 lines. "
+                        "Keep the key selling point, but do not produce a full "
+                        "sentence or paragraph."
+                    ),
+                    "image_translation": (
+                        "Same as full_translation. Use punchy headline copy, "
+                        "2 lines max, 5-10 words."
+                    ),
+                    "examples": [
+                        "Full-Sole Grip",
+                        "Cushions Every Step",
+                        "No-Slip Support",
+                    ],
+                },
+                "compact_label": {
+                    "applies_to": "items where type='compact_label'",
+                    "full_translation": (
+                        "Short marketing English for a small promo badge. Use "
+                        "2-5 words maximum. Keep numbers and promotion "
+                        "thresholds such as 1600 or 50% when present."
+                    ),
+                    "image_translation": (
+                        "Same as full_translation for compact labels. Keep it "
+                        "very short, 2-4 words."
+                    ),
+                    "examples": [
+                        "Member Gift",
+                        "Free Gift Over 1600",
+                        "Buy 2 Get 1 Free",
+                        "Limited Offer",
+                    ],
+                },
+                "title": {
+                    "applies_to": "items where type='title'",
+                    "full_translation": (
+                        "Natural English feature title. Use title case when it "
+                        "looks like a heading. Keep it concise and commercially "
+                        "clear."
+                    ),
+                    "image_translation": (
+                        "Use 2-6 words when possible. Keep title meaning clear."
+                    ),
+                    "examples": [
+                        "Five-Toe Design",
+                        "Elastic Cuff Design",
+                        "Premium Cotton Fabric",
+                    ],
+                },
+                "body": {
+                    "applies_to": "items where type='body'",
+                    "full_translation": (
+                        "Natural English explanatory copy. Preserve facts, "
+                        "materials, numbers, and warnings."
+                    ),
+                    "image_translation": (
+                        "Use a short readable phrase. Prefer one line; use two "
+                        "lines only when needed."
+                    ),
+                    "examples": [
+                        "Flexible & Comfortable",
+                        "Breathable & Soft",
+                        "Secure Grip, No Slipping",
+                    ],
+                },
             },
-            "bottom_hero_headline_rules": {
-                "applies_to": "items where type='bottom_hero_headline'",
-                "full_translation": (
-                    "Short bold English for the main bottom headline on a "
-                    "product image. 5-10 words max, preferably 2 lines. "
-                    "Keep the key selling point, but do NOT produce a full "
-                    "sentence or paragraph. Examples: 'Full-Sole Grip / "
-                    "Cushions Every Step', 'No-Slip Support / For Every Move'."
-                ),
-                "image_translation": (
-                    "Same as full_translation. Use punchy headline copy, "
-                    "2 lines max, 5-10 words."
-                ),
-            },
-            "compact_label_rules": {
-                "applies_to": "items where type='compact_label'",
-                "full_translation": (
-                    "Short marketing English for a small promo badge. "
-                    "2-5 words maximum. Keep numbers (¥1600, 50% etc). "
-                    "Natural e-commerce badge copy. "
-                    "Examples: 'Member Gift', 'Free Gift Over ¥1600', "
-                    "'Buy 2 Get 1 Free', 'Limited Offer'."
-                ),
-                "image_translation": (
-                    "Same as full_translation for compact labels — "
-                    "keep it very short, 2-4 words. "
-                    "Examples: 'Member Gift', 'Over ¥1600 Gift'."
-                ),
-            },
+            "quality_rules": [
+                "Every English word must be correctly spelled.",
+                "Do not output random English words.",
+                "Do not output invented words.",
+                "Do not leave Chinese characters in image_translation.",
+                "Do not add new product claims absent from the source.",
+                "Keep image_translation shorter than full_translation when space is tight.",
+            ],
             "required_json_schema": {
                 "translations": [
                     {
@@ -117,16 +170,11 @@ def _build_translation_user_message(
     )
 
 
-# ---------------------------------------------------------------------------
-# main API
-# ---------------------------------------------------------------------------
-
-
 def _mock_translations(texts: list[str]) -> list[dict]:
     """Return identity translations when no API key is configured."""
     return [
-        {"original": t, "full_translation": t, "image_translation": t}
-        for t in texts
+        {"original": text, "full_translation": text, "image_translation": text}
+        for text in texts
     ]
 
 
@@ -135,20 +183,7 @@ async def translate_texts_to_english(
     config: ModuleConfig,
     text_types: list[str] | None = None,
 ) -> list[dict]:
-    """Translate a batch of Chinese strings to English via LLM.
-
-    Args:
-        texts: List of Chinese text strings to translate.
-        config: Module configuration.
-        text_types: Optional per-item type hints: ``"title"``, ``"body"``,
-            ``"compact_label"``.  Affects the translation prompt.
-
-    Returns:
-        List of dicts: ``[{original, full_translation, image_translation}, ...]``
-
-    Raises:
-        TranslateError: When the API call or response parsing fails.
-    """
+    """Translate a batch of Chinese strings to English via an LLM."""
     if not texts:
         return []
 
@@ -184,7 +219,6 @@ async def translate_texts_to_english(
     except (KeyError, json.JSONDecodeError) as exc:
         raise TranslateError("Translation API returned invalid JSON") from exc
 
-    # Handle both {"translations": [...]} and bare [...] responses.
     if isinstance(data, list):
         translations = data
     elif isinstance(data, dict):
@@ -195,36 +229,36 @@ async def translate_texts_to_english(
     if not isinstance(translations, list):
         raise TranslateError("Translation JSON missing 'translations' key")
 
-    # Pad or trim to match input length.
     if len(translations) < len(texts):
         translations = list(translations) + [
-            texts[i] for i in range(len(translations), len(texts))
+            texts[index] for index in range(len(translations), len(texts))
         ]
     elif len(translations) > len(texts):
         translations = translations[: len(texts)]
 
     result: list[dict] = []
-    for idx, item in enumerate(translations):
+    for index, item in enumerate(translations):
         if isinstance(item, str):
-            result.append({
-                "original": texts[idx],
-                "full_translation": item.strip(),
-                "image_translation": item.strip(),
-            })
+            full_translation = item.strip()
+            image_translation = full_translation
+            original = texts[index]
         elif isinstance(item, dict):
-            ft = str(item.get("full_translation") or item.get("image_translation") or texts[idx]).strip()
-            it = str(item.get("image_translation") or item.get("full_translation") or texts[idx]).strip()
-            result.append({
-                "original": str(item.get("original") or texts[idx]),
-                "full_translation": ft,
-                "image_translation": it,
-            })
+            full_translation = str(
+                item.get("full_translation") or item.get("image_translation") or texts[index]
+            ).strip()
+            image_translation = str(
+                item.get("image_translation") or item.get("full_translation") or texts[index]
+            ).strip()
+            original = str(item.get("original") or texts[index])
         else:
-            val = str(item).strip()
-            result.append({
-                "original": texts[idx],
-                "full_translation": val,
-                "image_translation": val,
-            })
+            full_translation = str(item).strip()
+            image_translation = full_translation
+            original = texts[index]
+
+        result.append({
+            "original": original,
+            "full_translation": full_translation,
+            "image_translation": image_translation,
+        })
 
     return result

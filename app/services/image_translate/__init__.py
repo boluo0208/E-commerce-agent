@@ -24,6 +24,7 @@ Usage::
 from .config import ModuleConfig, get_config, set_config
 from .ocr import merge_ocr_lines_into_paragraphs
 from .pipeline import process_image, run_pipeline
+from .renderer import draw_merged_paragraph_translations, erase_and_draw_merged_paragraphs
 from .schemas import (
     ConfigError,
     ImageError,
@@ -37,6 +38,7 @@ from .schemas import (
     SplitInfo,
     TranslateError,
 )
+from .seedream_erase import erase_chinese_text_with_seedream
 
 __all__ = [
     # config
@@ -48,6 +50,11 @@ __all__ = [
     "process_image",
     # ocr
     "merge_ocr_lines_into_paragraphs",
+    # renderer
+    "erase_and_draw_merged_paragraphs",
+    "draw_merged_paragraph_translations",
+    # seedream
+    "erase_chinese_text_with_seedream",
     # schemas
     "PipelineInput",
     "PipelineOutput",

@@ -141,6 +141,25 @@ def _compute_color_label(vision_results: list[VisionResult]) -> str:
     return best_label
 
 
+def _compute_title_anchored_color_label(vision_results: list[VisionResult]) -> str:
+    """Return one normalized product color label from title-anchored vision results."""
+    darkness_order: dict[str, int] = {
+        "黑色": 0, "紫色": 1, "蓝色": 2, "棕色": 3,
+        "绿色": 4, "红色": 5, "灰色": 6, "银色": 7,
+        "橙色": 8, "金色": 9, "粉色": 10, "黄色": 11,
+        "米色": 12, "白色": 13,
+    }
+    best_rank = 999
+    best_label = "unknown"
+    for vision_result in vision_results:
+        label = (vision_result.color_label or "").strip()
+        rank = darkness_order.get(label, 999)
+        if rank < best_rank:
+            best_rank = rank
+            best_label = label
+    return best_label
+
+
 def _build_image_translate_config() -> ModuleConfig:
     """Map the main app's Settings to the image-translate module's config."""
     return ModuleConfig(
@@ -150,6 +169,12 @@ def _build_image_translate_config() -> ModuleConfig:
         mimo_api_key=settings.mimo_api_key,
         mimo_base_url=settings.mimo_base_url,
         mimo_model=settings.mimo_model,
+        ark_api_key=settings.ark_api_key,
+        ark_base_url=settings.ark_base_url,
+        ark_seedream_model=settings.ark_seedream_model,
+        use_seedream_erase=settings.use_seedream_erase,
+        seedream_watermark=settings.seedream_watermark,
+        seedream_timeout=settings.seedream_timeout,
         mock_translate_when_no_key=settings.mock_llm_when_no_key,
         mock_vision_when_no_key=settings.mock_vision_when_no_key,
         translate_image_text=settings.translate_image_text,
@@ -180,6 +205,7 @@ async def generate_product_export(
     processed_image_dir.mkdir(parents=True, exist_ok=True)
 
     uploaded_images: list[tuple[Path, Path]] = []
+    processed_image_paths_extra: list[Path] = []
     split_upload_dir = upload_dir / "splits"
     translated_upload_dir = upload_dir / "translated"
 
@@ -231,6 +257,13 @@ async def generate_product_export(
                 "processed_dimensions": None,  # filled after resize
             })
 
+            # ---- collect seedream intermediate if present -----------------
+            seedream_candidate = translated_source_path.parent / f"{translated_source_path.stem}_seedream_clean.jpg"
+            if seedream_candidate.exists():
+                seedream_dest = processed_image_dir / seedream_candidate.name
+                seedream_dest.write_bytes(seedream_candidate.read_bytes())
+                processed_image_paths_extra.append(seedream_dest)
+
             uploaded_images.append((translated_source_path, processed_image_path))
 
     semaphore = asyncio.Semaphore(settings.max_concurrent_images)
@@ -241,7 +274,10 @@ async def generate_product_export(
         processed_image_path: Path,
     ) -> VisionResult:
         async with semaphore:
-            vision_result = await analyze_product_image_with_mimo(upload_path)
+            vision_result = await analyze_product_image_with_mimo(
+                upload_path,
+                product_title=chinese_title,
+            )
 
         await asyncio.to_thread(
             resize_with_white_background,
@@ -260,9 +296,10 @@ async def generate_product_export(
         *(process_one(i, up, pip) for i, (up, pip) in enumerate(uploaded_images))
     )
     processed_image_paths = [processed_image_path for _, processed_image_path in uploaded_images]
+    processed_image_paths += processed_image_paths_extra
     image_files = [f"images/{processed_image_path.name}" for processed_image_path in processed_image_paths]
     combined_vision_result = _combine_vision_results(vision_results)
-    overall_color = _compute_color_label(vision_results)
+    overall_color = _compute_title_anchored_color_label(vision_results)
     content = await generate_content_with_deepseek(chinese_title, combined_vision_result)
 
     rows = [
